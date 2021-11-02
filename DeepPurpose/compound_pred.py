@@ -11,13 +11,8 @@ import torch.nn.functional as F
 from lifelines.utils import concordance_index
 from prettytable import PrettyTable
 from scipy.stats import pearsonr
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    log_loss,
-    mean_squared_error,
-    roc_auc_score,
-)
+from sklearn.metrics import (average_precision_score, f1_score,
+                             mean_squared_error, roc_auc_score)
 from torch import nn
 from torch.autograd import Variable
 from torch.utils import data
@@ -26,31 +21,32 @@ from torch.utils.data import SequentialSampler
 from DeepPurpose.encoders import *
 from DeepPurpose.utils import *
 
-torch.manual_seed(2)
+torch.manual_seed(2)  # reproducible torch:2 np:3
 np.random.seed(3)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Classifier(nn.Sequential):
     def __init__(self, model_drug, **config):
         super(Classifier, self).__init__()
         self.input_dim_drug = config["hidden_dim_drug"]
+
         self.model_drug = model_drug
+
         self.dropout = nn.Dropout(0.1)
 
         self.hidden_dims = config["cls_hidden_dims"]
         layer_size = len(self.hidden_dims) + 1
-        dims = [self.input_dim_drug + self.input_dim_drug] + self.hidden_dims + [1]
+        dims = [self.input_dim_drug] + self.hidden_dims + [1]
 
         self.predictor = nn.ModuleList(
             [nn.Linear(dims[i], dims[i + 1]) for i in range(layer_size)]
         )
 
-    def forward(self, v_D, v_P):
+    def forward(self, v_D):
         # each encoding
-        v_D = self.model_drug(v_D)
-        v_P = self.model_drug(v_P)
+        v_f = self.model_drug(v_D)
         # concatenate and classify
-        v_f = torch.cat((v_D, v_P), 1)
         for i, l in enumerate(self.predictor):
             if i == (len(self.predictor) - 1):
                 v_f = l(v_f)
@@ -60,7 +56,7 @@ class Classifier(nn.Sequential):
 
 
 def model_initialize(**config):
-    model = DDI_Model(**config)
+    model = Property_Prediction(**config)
     return model
 
 
@@ -68,23 +64,103 @@ def model_pretrained(path_dir=None, model=None):
     if model is not None:
         path_dir = download_pretrained_model(model)
     config = load_dict(path_dir)
-    model = DDI_Model(**config)
+    model = Property_Prediction(**config)
     model.load_pretrained(path_dir + "/model.pt")
     return model
 
 
+def repurpose(
+    X_repurpose,
+    model,
+    drug_names=None,
+    result_folder="./result/",
+    convert_y=False,
+    verbose=True,
+):
+    # X_repurpose: a list of SMILES string
+    fo = os.path.join(result_folder, "repurposing.txt")
+    print_list = []
+    with open(fo, "w") as fout:
+        print("repurposing...")
+
+        df_data, _, _ = data_process(
+            X_repurpose,
+            drug_encoding=model.drug_encoding,
+            split_method="repurposing_VS",
+        )
+        y_pred = model.predict(df_data)
+
+        if convert_y:
+            y_pred = convert_y_unit(np.array(y_pred), "p", "nM")
+
+        print("---------------")
+        if verbose:
+            print("Drug Repurposing Result")
+        if model.binary:
+            table_header = ["Rank", "Drug Name", "Interaction", "Probability"]
+        else:
+            ### regression
+            table_header = ["Rank", "Drug Name", "Binding Score"]
+        table = PrettyTable(table_header)
+
+        if drug_names is not None:
+            f_d = max([len(o) for o in drug_names]) + 1
+            for i in range(len(X_repurpose)):
+                if model.binary:
+                    if y_pred[i] > 0.5:
+                        string_lst = [drug_names[i], "YES", "{0:.2f}".format(y_pred[i])]
+
+                    else:
+                        string_lst = [drug_names[i], "NO", "{0:.2f}".format(y_pred[i])]
+                else:
+                    #### regression
+                    #### Rank, Drug Name, Target Name, binding score
+                    string_lst = [drug_names[i], "{0:.2f}".format(y_pred[i])]
+                    string = (
+                        "Drug "
+                        + "{:<{f_d}}".format(drug_names[i], f_d=f_d)
+                        + " predicted to have binding affinity score "
+                        + "{0:.2f}".format(y_pred[i])
+                    )
+                    # print_list.append((string, y_pred[i]))
+                print_list.append((string_lst, y_pred[i]))
+
+        if convert_y:
+            print_list.sort(key=lambda x: x[1])
+        else:
+            print_list.sort(key=lambda x: x[1], reverse=True)
+
+        print_list = [i[0] for i in print_list]
+        for idx, lst in enumerate(print_list):
+            lst = [str(idx + 1)] + lst
+            table.add_row(lst)
+        fout.write(table.get_string())
+    if verbose:
+        with open(fo, "r") as fin:
+            lines = fin.readlines()
+            for idx, line in enumerate(lines):
+                if idx < 13:
+                    print(line, end="")
+                else:
+                    print("checkout " + fo + " for the whole list")
+                    break
+    return y_pred
+
+
 def dgl_collate_func(x):
-    d1, d2, y = zip(*x)
+    x, y = zip(*x)
 
-    d1 = dgl.batch(d1)
-    d2 = dgl.batch(d2)
-    return d1, d2, torch.tensor(y)
+    x = dgl.batch(x)
+    return x, torch.tensor(y)
 
 
-class DDI_Model:
+class Property_Prediction:
+    """
+    Drug Property Prediction
+    """
+
     def __init__(self, **config):
         drug_encoding = config["drug_encoding"]
-        target_encoding = config["target_encoding"]
 
         if (
             drug_encoding == "Morgan"
@@ -160,11 +236,13 @@ class DDI_Model:
         if "decay" not in self.config.keys():
             self.config["decay"] = 0
 
-    def test_(self, data_generator, model, repurposing_mode=False, test=False):
+    def test_(
+        self, data_generator, model, repurposing_mode=False, test=False, verbose=True
+    ):
         y_pred = []
         y_label = []
         model.eval()
-        for i, (v_d, v_p, label) in enumerate(data_generator):
+        for i, (v_d, label) in enumerate(data_generator):
             if self.drug_encoding in [
                 "MPNN",
                 "Transformer",
@@ -175,38 +253,40 @@ class DDI_Model:
                 "DGL_AttentiveFP",
             ]:
                 v_d = v_d
-                v_p = v_p
             else:
                 v_d = v_d.float().to(self.device)
-                v_p = v_p.float().to(self.device)
-            score = self.model(v_d, v_p)
+
+            score = self.model(v_d)
+
             if self.binary:
                 m = torch.nn.Sigmoid()
                 logits = torch.squeeze(m(score)).detach().cpu().numpy()
             else:
                 logits = torch.squeeze(score).detach().cpu().numpy()
+
             label_ids = label.to("cpu").numpy()
             y_label = y_label + label_ids.flatten().tolist()
             y_pred = y_pred + logits.flatten().tolist()
             outputs = np.asarray([1 if i else 0 for i in (np.asarray(y_pred) >= 0.5)])
+
         model.train()
         if self.binary:
             if repurposing_mode:
                 return y_pred
             ## ROC-AUC curve
             if test:
-                roc_auc_file = os.path.join(self.result_folder, "roc-auc.jpg")
-                plt.figure(0)
-                roc_curve(y_pred, y_label, roc_auc_file, self.drug_encoding)
-                plt.figure(1)
-                pr_auc_file = os.path.join(self.result_folder, "pr-auc.jpg")
-                prauc_curve(y_pred, y_label, pr_auc_file, self.drug_encoding)
+                if verbose:
+                    roc_auc_file = os.path.join(self.result_folder, "roc-auc.jpg")
+                    plt.figure(0)
+                    roc_curve(y_pred, y_label, roc_auc_file, self.drug_encoding)
+                    plt.figure(1)
+                    pr_auc_file = os.path.join(self.result_folder, "pr-auc.jpg")
+                    prauc_curve(y_pred, y_label, pr_auc_file, self.drug_encoding)
 
             return (
                 roc_auc_score(y_label, y_pred),
                 average_precision_score(y_label, y_pred),
                 f1_score(y_label, outputs),
-                log_loss(y_label, outputs),
                 y_pred,
             )
         else:
@@ -227,12 +307,9 @@ class DDI_Model:
 
         lr = self.config["LR"]
         decay = self.config["decay"]
+
         BATCH_SIZE = self.config["batch_size"]
         train_epoch = self.config["train_epoch"]
-        if "test_every_X_epoch" in self.config.keys():
-            test_every_X_epoch = self.config["test_every_X_epoch"]
-        else:
-            test_every_X_epoch = 40
         loss_history = []
 
         self.model = self.model.to(self.device)
@@ -250,6 +327,7 @@ class DDI_Model:
                 print("Let's use CPU/s!")
         # Future TODO: support multiple optimizers with parameters
         opt = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=decay)
+
         if verbose:
             print("--- Data Preparation ---")
 
@@ -271,20 +349,20 @@ class DDI_Model:
             params["collate_fn"] = dgl_collate_func
 
         training_generator = data.DataLoader(
-            data_process_DDI_loader(
+            data_process_loader_Property_Prediction(
                 train.index.values, train.Label.values, train, **self.config
             ),
             **params,
         )
         validation_generator = data.DataLoader(
-            data_process_DDI_loader(
+            data_process_loader_Property_Prediction(
                 val.index.values, val.Label.values, val, **self.config
             ),
             **params,
         )
 
         if test is not None:
-            info = data_process_loader(
+            info = data_process_loader_Property_Prediction(
                 test.index.values, test.Label.values, test, **self.config
             )
             params_test = {
@@ -299,6 +377,7 @@ class DDI_Model:
                 params_test["collate_fn"] = mpnn_collate_func
             elif self.drug_encoding in [
                 "DGL_GCN",
+                "DGL_GAT",
                 "DGL_NeuralFP",
                 "DGL_GIN_AttrMasking",
                 "DGL_GIN_ContextPred",
@@ -306,7 +385,7 @@ class DDI_Model:
             ]:
                 params_test["collate_fn"] = dgl_collate_func
             testing_generator = data.DataLoader(
-                data_process_DDI_loader(
+                data_process_loader_Property_Prediction(
                     test.index.values, test.Label.values, test, **self.config
                 ),
                 **params_test,
@@ -329,11 +408,13 @@ class DDI_Model:
             )
         table = PrettyTable(valid_metric_header)
         float2str = lambda x: "%0.4f" % x
+
         if verbose:
             print("--- Go for Training ---")
         t_start = time()
         for epo in range(train_epoch):
-            for i, (v_d, v_p, label) in enumerate(training_generator):
+            for i, (v_d, label) in enumerate(training_generator):
+
                 if self.drug_encoding in [
                     "MPNN",
                     "Transformer",
@@ -344,12 +425,11 @@ class DDI_Model:
                     "DGL_AttentiveFP",
                 ]:
                     v_d = v_d
-                    v_p = v_p
                 else:
                     v_d = v_d.float().to(self.device)
-                    v_p = v_p.float().to(self.device)
+                    # score = self.model(v_d, v_p.float().to(self.device))
 
-                score = self.model(v_d, v_p)
+                score = self.model(v_d)
                 label = Variable(torch.from_numpy(np.array(label)).float()).to(
                     self.device
                 )
@@ -372,24 +452,25 @@ class DDI_Model:
                 if verbose:
                     if i % 100 == 0:
                         t_now = time()
-                        print(
-                            "Training at Epoch "
-                            + str(epo + 1)
-                            + " iteration "
-                            + str(i)
-                            + " with loss "
-                            + str(loss.cpu().detach().numpy())[:7]
-                            + ". Total time "
-                            + str(int(t_now - t_start) / 3600)[:7]
-                            + " hours"
-                        )
+                        if verbose:
+                            print(
+                                "Training at Epoch "
+                                + str(epo + 1)
+                                + " iteration "
+                                + str(i)
+                                + " with loss "
+                                + str(loss.cpu().detach().numpy())[:7]
+                                + ". Total time "
+                                + str(int(t_now - t_start) / 3600)[:7]
+                                + " hours"
+                            )
                         ### record total run time
 
             ##### validate, select the best model up to now
             with torch.set_grad_enabled(False):
                 if self.binary:
-                    ## binary: ROC-AUC, PR-AUC, F1, cross-entropy loss
-                    auc, auprc, f1, loss, logits = self.test_(
+                    ## binary: ROC-AUC, PR-AUC, F1
+                    auc, auprc, f1, logits = self.test_(
                         validation_generator, self.model
                     )
                     lst = ["epoch " + str(epo)] + list(map(float2str, [auc, auprc, f1]))
@@ -407,8 +488,6 @@ class DDI_Model:
                             + str(auprc)[:7]
                             + " , F1: "
                             + str(f1)[:7]
-                            + " , Cross-entropy Loss: "
-                            + str(loss)[:7]
                         )
                 else:
                     ### regression: MSE, Pearson Correlation, with p-value, Concordance Index
@@ -437,38 +516,36 @@ class DDI_Model:
                         )
             table.add_row(lst)
 
-        # load early stopped model
-        self.model = model_max
-
         #### after training
         prettytable_file = os.path.join(self.result_folder, "valid_markdowntable.txt")
         with open(prettytable_file, "w") as fp:
             fp.write(table.get_string())
 
+        # load early stopped model
+        self.model = model_max
+
         if test is not None:
             if verbose:
                 print("--- Go for Testing ---")
             if self.binary:
-                auc, auprc, f1, loss, logits = self.test_(
-                    testing_generator, model_max, test=True
+                auc, auprc, f1, logits = self.test_(
+                    testing_generator, model_max, test=True, verbose=verbose
                 )
                 test_table = PrettyTable(["AUROC", "AUPRC", "F1"])
                 test_table.add_row(list(map(float2str, [auc, auprc, f1])))
                 if verbose:
                     print(
-                        "Validation at Epoch "
-                        + str(epo + 1)
-                        + " , AUROC: "
-                        + str(auc)[:7]
+                        "Testing AUROC: "
+                        + str(auc)
                         + " , AUPRC: "
-                        + str(auprc)[:7]
+                        + str(auprc)
                         + " , F1: "
-                        + str(f1)[:7]
-                        + " , Cross-entropy Loss: "
-                        + str(loss)[:7]
+                        + str(f1)
                     )
             else:
-                mse, r2, p_val, CI, logits = self.test_(testing_generator, model_max)
+                mse, r2, p_val, CI, logits = self.test_(
+                    testing_generator, model_max, test=True, verbose=verbose
+                )
                 test_table = PrettyTable(
                     ["MSE", "Pearson Correlation", "with p-value", "Concordance Index"]
                 )
@@ -500,29 +577,31 @@ class DDI_Model:
             with open(prettytable_file, "w") as fp:
                 fp.write(test_table.get_string())
 
-        ### 2. learning curve
-        fontsize = 16
-        iter_num = list(range(1, len(loss_history) + 1))
-        plt.figure(3)
-        plt.plot(iter_num, loss_history, "bo-")
-        plt.xlabel("iteration", fontsize=fontsize)
-        plt.ylabel("loss value", fontsize=fontsize)
-        pkl_file = os.path.join(self.result_folder, "loss_curve_iter.pkl")
-        with open(pkl_file, "wb") as pck:
-            pickle.dump(loss_history, pck)
+        if verbose:
+            ### 2. learning curve
+            fontsize = 16
+            iter_num = list(range(1, len(loss_history) + 1))
+            plt.figure(3)
+            plt.plot(iter_num, loss_history, "bo-")
+            plt.xlabel("iteration", fontsize=fontsize)
+            plt.ylabel("loss value", fontsize=fontsize)
+            pkl_file = os.path.join(self.result_folder, "loss_curve_iter.pkl")
+            with open(pkl_file, "wb") as pck:
+                pickle.dump(loss_history, pck)
 
-        fig_file = os.path.join(self.result_folder, "loss_curve.png")
-        plt.savefig(fig_file)
+            fig_file = os.path.join(self.result_folder, "loss_curve.png")
+            plt.savefig(fig_file)
         if verbose:
             print("--- Training Finished ---")
 
-    def predict(self, df_data):
+    def predict(self, df_data, verbose=True):
         """
         utils.data_process_repurpose_virtual_screening
         pd.DataFrame
         """
-        print("predicting...")
-        info = data_process_DDI_loader(
+        if verbose:
+            print("predicting...")
+        info = data_process_loader_Property_Prediction(
             df_data.index.values, df_data.Label.values, df_data, **self.config
         )
         self.model.to(device)
@@ -538,7 +617,6 @@ class DDI_Model:
             params["collate_fn"] = mpnn_collate_func
         elif self.drug_encoding in [
             "DGL_GCN",
-            "DGL_GAT",
             "DGL_NeuralFP",
             "DGL_GIN_AttrMasking",
             "DGL_GIN_ContextPred",
@@ -549,6 +627,7 @@ class DDI_Model:
         generator = data.DataLoader(info, **params)
 
         score = self.test_(generator, self.model, repurposing_mode=True)
+        # set repurposong mode to true, will return only the scores.
         return score
 
     def save_model(self, path_dir):

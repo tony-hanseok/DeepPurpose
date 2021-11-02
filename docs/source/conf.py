@@ -18,13 +18,12 @@
 # -- Project information -----------------------------------------------------
 import sphinx_rtd_theme
 
-
-project = 'DeepPurpose'
-copyright = '2020, Kexin Huang, Tianfan Fu'
-author = 'Kexin Huang, Tianfan Fu'
+project = "DeepPurpose"
+copyright = "2020, Kexin Huang, Tianfan Fu"
+author = "Kexin Huang, Tianfan Fu"
 
 # The full version, including alpha/beta/rc tags
-release = '0.0.1'
+release = "0.0.1"
 
 
 # -- General configuration ---------------------------------------------------
@@ -32,17 +31,14 @@ release = '0.0.1'
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
-extensions = [
-]
+extensions = []
 
 # Add any paths that contain templates here, relative to this directory.
-templates_path = ['_templates']
+templates_path = ["_templates"]
 
 
-source_parsers = {
-'.md' : 'recommonmark.parser.CommonMarkParser'
-}
-source_suffix = ['.rst', '.md']
+source_parsers = {".md": "recommonmark.parser.CommonMarkParser"}
+source_suffix = [".rst", ".md"]
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -55,30 +51,30 @@ exclude_patterns = []
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'alabaster' ## origin 
-html_theme = 'sphinx_rtd_theme'
+html_theme = "alabaster"  ## origin
+html_theme = "sphinx_rtd_theme"
 
 
 # The theme to use for HTML and HTML Help pages.  See the     documentation for
 # a list of builtin themes.
 
 html_theme_options = {
-   'collapse_navigation': False,
-   'display_version': True,
-   'logo_only': False,
+    "collapse_navigation": False,
+    "display_version": True,
+    "logo_only": False,
 }
 
 
 html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
-html_logo = '../build/html/_images/logo_deeppurpose_horizontal.png'
+html_logo = "../build/html/_images/logo_deeppurpose_horizontal.png"
 
-html_logo = '../build/html/_images/logo_dp_2.png'
-## logo_dp_2.png 
+html_logo = "../build/html/_images/logo_dp_2.png"
+## logo_dp_2.png
 
 html_context = {
-    'css_files': [
-  	   'https://fonts.googleapis.com/css?family=Raleway',
-       '../build/html/_static/css/deeppurpose_docs_theme.css'
+    "css_files": [
+        "https://fonts.googleapis.com/css?family=Raleway",
+        "../build/html/_static/css/deeppurpose_docs_theme.css",
     ],
 }
 
@@ -86,27 +82,4 @@ html_context = {
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['_static']
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+html_static_path = ["_static"]

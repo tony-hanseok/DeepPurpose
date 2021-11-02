@@ -3,7 +3,6 @@ import os
 import pickle
 from time import time
 
-import dgl
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -11,13 +10,8 @@ import torch.nn.functional as F
 from lifelines.utils import concordance_index
 from prettytable import PrettyTable
 from scipy.stats import pearsonr
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    log_loss,
-    mean_squared_error,
-    roc_auc_score,
-)
+from sklearn.metrics import (average_precision_score, f1_score,
+                             mean_squared_error, roc_auc_score)
 from torch import nn
 from torch.autograd import Variable
 from torch.utils import data
@@ -28,29 +22,30 @@ from DeepPurpose.utils import *
 
 torch.manual_seed(2)
 np.random.seed(3)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Classifier(nn.Sequential):
-    def __init__(self, model_drug, **config):
+    def __init__(self, model_protein, **config):
         super(Classifier, self).__init__()
-        self.input_dim_drug = config["hidden_dim_drug"]
-        self.model_drug = model_drug
+        self.input_dim_protein = config["hidden_dim_protein"]
+
+        self.model_protein = model_protein
+
         self.dropout = nn.Dropout(0.1)
 
         self.hidden_dims = config["cls_hidden_dims"]
         layer_size = len(self.hidden_dims) + 1
-        dims = [self.input_dim_drug + self.input_dim_drug] + self.hidden_dims + [1]
+        dims = [self.input_dim_protein] + self.hidden_dims + [1]
 
         self.predictor = nn.ModuleList(
             [nn.Linear(dims[i], dims[i + 1]) for i in range(layer_size)]
         )
 
-    def forward(self, v_D, v_P):
+    def forward(self, v_P):
         # each encoding
-        v_D = self.model_drug(v_D)
-        v_P = self.model_drug(v_P)
+        v_f = self.model_protein(v_P)
         # concatenate and classify
-        v_f = torch.cat((v_D, v_P), 1)
         for i, l in enumerate(self.predictor):
             if i == (len(self.predictor) - 1):
                 v_f = l(v_f)
@@ -60,7 +55,7 @@ class Classifier(nn.Sequential):
 
 
 def model_initialize(**config):
-    model = DDI_Model(**config)
+    model = Protein_Prediction(**config)
     return model
 
 
@@ -68,89 +63,45 @@ def model_pretrained(path_dir=None, model=None):
     if model is not None:
         path_dir = download_pretrained_model(model)
     config = load_dict(path_dir)
-    model = DDI_Model(**config)
+    model = Protein_Prediction(**config)
     model.load_pretrained(path_dir + "/model.pt")
     return model
 
 
-def dgl_collate_func(x):
-    d1, d2, y = zip(*x)
+class Protein_Prediction:
+    """
+    Protein Function Prediction
+    """
 
-    d1 = dgl.batch(d1)
-    d2 = dgl.batch(d2)
-    return d1, d2, torch.tensor(y)
-
-
-class DDI_Model:
     def __init__(self, **config):
-        drug_encoding = config["drug_encoding"]
         target_encoding = config["target_encoding"]
 
         if (
-            drug_encoding == "Morgan"
-            or drug_encoding == "ErG"
-            or drug_encoding == "Pubchem"
-            or drug_encoding == "Daylight"
-            or drug_encoding == "rdkit_2d_normalized"
-            or drug_encoding == "ESPF"
+            target_encoding == "AAC"
+            or target_encoding == "PseudoAAC"
+            or target_encoding == "Conjoint_triad"
+            or target_encoding == "Quasi-seq"
+            or target_encoding == "ESPF"
         ):
-            # Future TODO: support multiple encoding scheme for static input
-            self.model_drug = MLP(
-                config["input_dim_drug"],
-                config["hidden_dim_drug"],
-                config["mlp_hidden_dims_drug"],
+            self.model_protein = MLP(
+                config["input_dim_protein"],
+                config["hidden_dim_protein"],
+                config["mlp_hidden_dims_target"],
             )
-        elif drug_encoding == "CNN":
-            self.model_drug = CNN("drug", **config)
-        elif drug_encoding == "CNN_RNN":
-            self.model_drug = CNN_RNN("drug", **config)
-        elif drug_encoding == "Transformer":
-            self.model_drug = transformer("drug", **config)
-        elif drug_encoding == "MPNN":
-            self.model_drug = MPNN(config["hidden_dim_drug"], config["mpnn_depth"])
-        elif drug_encoding == "DGL_GCN":
-            self.model_drug = DGL_GCN(
-                in_feats=74,
-                hidden_feats=[config["gnn_hid_dim_drug"]] * config["gnn_num_layers"],
-                activation=[config["gnn_activation"]] * config["gnn_num_layers"],
-                predictor_dim=config["hidden_dim_drug"],
-            )
-        elif drug_encoding == "DGL_NeuralFP":
-            self.model_drug = DGL_NeuralFP(
-                in_feats=74,
-                hidden_feats=[config["gnn_hid_dim_drug"]] * config["gnn_num_layers"],
-                max_degree=config["neuralfp_max_degree"],
-                activation=[config["gnn_activation"]] * config["gnn_num_layers"],
-                predictor_hidden_size=config["neuralfp_predictor_hid_dim"],
-                predictor_dim=config["hidden_dim_drug"],
-                predictor_activation=config["neuralfp_predictor_activation"],
-            )
-        elif drug_encoding == "DGL_GIN_AttrMasking":
-            self.model_drug = DGL_GIN_AttrMasking(
-                predictor_dim=config["hidden_dim_drug"]
-            )
-        elif drug_encoding == "DGL_GIN_ContextPred":
-            self.model_drug = DGL_GIN_ContextPred(
-                predictor_dim=config["hidden_dim_drug"]
-            )
-        elif drug_encoding == "DGL_AttentiveFP":
-            self.model_drug = DGL_AttentiveFP(
-                node_feat_size=39,
-                edge_feat_size=11,
-                num_layers=config["gnn_num_layers"],
-                num_timesteps=config["attentivefp_num_timesteps"],
-                graph_feat_size=config["gnn_hid_dim_drug"],
-                predictor_dim=config["hidden_dim_drug"],
-            )
-
+        elif target_encoding == "CNN":
+            self.model_protein = CNN("protein", **config)
+        elif target_encoding == "CNN_RNN":
+            self.model_protein = CNN_RNN("protein", **config)
+        elif target_encoding == "Transformer":
+            self.model_protein = transformer("protein", **config)
         else:
             raise AttributeError("Please use one of the available encoding method.")
 
-        self.model = Classifier(self.model_drug, **config)
+        self.model = Classifier(self.model_protein, **config)
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.drug_encoding = drug_encoding
+        self.target_encoding = target_encoding
         self.result_folder = config["result_folder"]
         if not os.path.exists(self.result_folder):
             os.mkdir(self.result_folder)
@@ -160,53 +111,48 @@ class DDI_Model:
         if "decay" not in self.config.keys():
             self.config["decay"] = 0
 
-    def test_(self, data_generator, model, repurposing_mode=False, test=False):
+    def test_(
+        self, data_generator, model, repurposing_mode=False, test=False, verbose=True
+    ):
         y_pred = []
         y_label = []
         model.eval()
-        for i, (v_d, v_p, label) in enumerate(data_generator):
-            if self.drug_encoding in [
-                "MPNN",
-                "Transformer",
-                "DGL_GCN",
-                "DGL_NeuralFP",
-                "DGL_GIN_AttrMasking",
-                "DGL_GIN_ContextPred",
-                "DGL_AttentiveFP",
-            ]:
-                v_d = v_d
+        for i, (v_p, label) in enumerate(data_generator):
+            if self.target_encoding == "Transformer":
                 v_p = v_p
             else:
-                v_d = v_d.float().to(self.device)
                 v_p = v_p.float().to(self.device)
-            score = self.model(v_d, v_p)
+            score = self.model(v_p)
+
             if self.binary:
                 m = torch.nn.Sigmoid()
                 logits = torch.squeeze(m(score)).detach().cpu().numpy()
             else:
                 logits = torch.squeeze(score).detach().cpu().numpy()
+
             label_ids = label.to("cpu").numpy()
             y_label = y_label + label_ids.flatten().tolist()
             y_pred = y_pred + logits.flatten().tolist()
             outputs = np.asarray([1 if i else 0 for i in (np.asarray(y_pred) >= 0.5)])
+
         model.train()
         if self.binary:
             if repurposing_mode:
                 return y_pred
             ## ROC-AUC curve
             if test:
-                roc_auc_file = os.path.join(self.result_folder, "roc-auc.jpg")
-                plt.figure(0)
-                roc_curve(y_pred, y_label, roc_auc_file, self.drug_encoding)
-                plt.figure(1)
-                pr_auc_file = os.path.join(self.result_folder, "pr-auc.jpg")
-                prauc_curve(y_pred, y_label, pr_auc_file, self.drug_encoding)
+                if verbose:
+                    roc_auc_file = os.path.join(self.result_folder, "roc-auc.jpg")
+                    plt.figure(0)
+                    roc_curve(y_pred, y_label, roc_auc_file, self.target_encoding)
+                    plt.figure(1)
+                    pr_auc_file = os.path.join(self.result_folder, "pr-auc.jpg")
+                    prauc_curve(y_pred, y_label, pr_auc_file, self.target_encoding)
 
             return (
                 roc_auc_score(y_label, y_pred),
                 average_precision_score(y_label, y_pred),
                 f1_score(y_label, outputs),
-                log_loss(y_label, outputs),
                 y_pred,
             )
         else:
@@ -227,6 +173,7 @@ class DDI_Model:
 
         lr = self.config["LR"]
         decay = self.config["decay"]
+
         BATCH_SIZE = self.config["batch_size"]
         train_epoch = self.config["train_epoch"]
         if "test_every_X_epoch" in self.config.keys():
@@ -250,6 +197,7 @@ class DDI_Model:
                 print("Let's use CPU/s!")
         # Future TODO: support multiple optimizers with parameters
         opt = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=decay)
+
         if verbose:
             print("--- Data Preparation ---")
 
@@ -259,32 +207,22 @@ class DDI_Model:
             "num_workers": self.config["num_workers"],
             "drop_last": False,
         }
-        if self.drug_encoding == "MPNN":
-            params["collate_fn"] = mpnn_collate_func
-        elif self.drug_encoding in [
-            "DGL_GCN",
-            "DGL_NeuralFP",
-            "DGL_GIN_AttrMasking",
-            "DGL_GIN_ContextPred",
-            "DGL_AttentiveFP",
-        ]:
-            params["collate_fn"] = dgl_collate_func
 
         training_generator = data.DataLoader(
-            data_process_DDI_loader(
+            data_process_loader_Protein_Prediction(
                 train.index.values, train.Label.values, train, **self.config
             ),
             **params,
         )
         validation_generator = data.DataLoader(
-            data_process_DDI_loader(
+            data_process_loader_Protein_Prediction(
                 val.index.values, val.Label.values, val, **self.config
             ),
             **params,
         )
 
         if test is not None:
-            info = data_process_loader(
+            info = data_process_loader_Protein_Prediction(
                 test.index.values, test.Label.values, test, **self.config
             )
             params_test = {
@@ -294,19 +232,8 @@ class DDI_Model:
                 "drop_last": False,
                 "sampler": SequentialSampler(info),
             }
-
-            if self.drug_encoding == "MPNN":
-                params_test["collate_fn"] = mpnn_collate_func
-            elif self.drug_encoding in [
-                "DGL_GCN",
-                "DGL_NeuralFP",
-                "DGL_GIN_AttrMasking",
-                "DGL_GIN_ContextPred",
-                "DGL_AttentiveFP",
-            ]:
-                params_test["collate_fn"] = dgl_collate_func
             testing_generator = data.DataLoader(
-                data_process_DDI_loader(
+                data_process_loader_Protein_Prediction(
                     test.index.values, test.Label.values, test, **self.config
                 ),
                 **params_test,
@@ -329,27 +256,19 @@ class DDI_Model:
             )
         table = PrettyTable(valid_metric_header)
         float2str = lambda x: "%0.4f" % x
+
         if verbose:
             print("--- Go for Training ---")
         t_start = time()
         for epo in range(train_epoch):
-            for i, (v_d, v_p, label) in enumerate(training_generator):
-                if self.drug_encoding in [
-                    "MPNN",
-                    "Transformer",
-                    "DGL_GCN",
-                    "DGL_NeuralFP",
-                    "DGL_GIN_AttrMasking",
-                    "DGL_GIN_ContextPred",
-                    "DGL_AttentiveFP",
-                ]:
-                    v_d = v_d
+            for i, (v_p, label) in enumerate(training_generator):
+
+                if self.target_encoding == "Transformer":
                     v_p = v_p
                 else:
-                    v_d = v_d.float().to(self.device)
                     v_p = v_p.float().to(self.device)
 
-                score = self.model(v_d, v_p)
+                score = self.model(v_p)
                 label = Variable(torch.from_numpy(np.array(label)).float()).to(
                     self.device
                 )
@@ -372,24 +291,25 @@ class DDI_Model:
                 if verbose:
                     if i % 100 == 0:
                         t_now = time()
-                        print(
-                            "Training at Epoch "
-                            + str(epo + 1)
-                            + " iteration "
-                            + str(i)
-                            + " with loss "
-                            + str(loss.cpu().detach().numpy())[:7]
-                            + ". Total time "
-                            + str(int(t_now - t_start) / 3600)[:7]
-                            + " hours"
-                        )
+                        if verbose:
+                            print(
+                                "Training at Epoch "
+                                + str(epo + 1)
+                                + " iteration "
+                                + str(i)
+                                + " with loss "
+                                + str(loss.cpu().detach().numpy())[:7]
+                                + ". Total time "
+                                + str(int(t_now - t_start) / 3600)[:7]
+                                + " hours"
+                            )
                         ### record total run time
 
             ##### validate, select the best model up to now
             with torch.set_grad_enabled(False):
                 if self.binary:
-                    ## binary: ROC-AUC, PR-AUC, F1, cross-entropy loss
-                    auc, auprc, f1, loss, logits = self.test_(
+                    ## binary: ROC-AUC, PR-AUC, F1
+                    auc, auprc, f1, logits = self.test_(
                         validation_generator, self.model
                     )
                     lst = ["epoch " + str(epo)] + list(map(float2str, [auc, auprc, f1]))
@@ -407,8 +327,6 @@ class DDI_Model:
                             + str(auprc)[:7]
                             + " , F1: "
                             + str(f1)[:7]
-                            + " , Cross-entropy Loss: "
-                            + str(loss)[:7]
                         )
                 else:
                     ### regression: MSE, Pearson Correlation, with p-value, Concordance Index
@@ -437,38 +355,36 @@ class DDI_Model:
                         )
             table.add_row(lst)
 
-        # load early stopped model
-        self.model = model_max
-
         #### after training
         prettytable_file = os.path.join(self.result_folder, "valid_markdowntable.txt")
         with open(prettytable_file, "w") as fp:
             fp.write(table.get_string())
 
+        # load early stopped model
+        self.model = model_max
+
         if test is not None:
             if verbose:
                 print("--- Go for Testing ---")
             if self.binary:
-                auc, auprc, f1, loss, logits = self.test_(
-                    testing_generator, model_max, test=True
+                auc, auprc, f1, logits = self.test_(
+                    testing_generator, model_max, test=True, verbose=verbose
                 )
                 test_table = PrettyTable(["AUROC", "AUPRC", "F1"])
                 test_table.add_row(list(map(float2str, [auc, auprc, f1])))
                 if verbose:
                     print(
-                        "Validation at Epoch "
-                        + str(epo + 1)
-                        + " , AUROC: "
-                        + str(auc)[:7]
+                        "Testing AUROC: "
+                        + str(auc)
                         + " , AUPRC: "
-                        + str(auprc)[:7]
+                        + str(auprc)
                         + " , F1: "
-                        + str(f1)[:7]
-                        + " , Cross-entropy Loss: "
-                        + str(loss)[:7]
+                        + str(f1)
                     )
             else:
-                mse, r2, p_val, CI, logits = self.test_(testing_generator, model_max)
+                mse, r2, p_val, CI, logits = self.test_(
+                    testing_generator, model_max, test=True, verbose=verbose
+                )
                 test_table = PrettyTable(
                     ["MSE", "Pearson Correlation", "with p-value", "Concordance Index"]
                 )
@@ -486,7 +402,7 @@ class DDI_Model:
                     )
             np.save(
                 os.path.join(
-                    self.result_folder, str(self.drug_encoding) + "_logits.npy"
+                    self.result_folder, str(self.target_encoding) + "_logits.npy"
                 ),
                 np.array(logits),
             )
@@ -500,29 +416,31 @@ class DDI_Model:
             with open(prettytable_file, "w") as fp:
                 fp.write(test_table.get_string())
 
-        ### 2. learning curve
-        fontsize = 16
-        iter_num = list(range(1, len(loss_history) + 1))
-        plt.figure(3)
-        plt.plot(iter_num, loss_history, "bo-")
-        plt.xlabel("iteration", fontsize=fontsize)
-        plt.ylabel("loss value", fontsize=fontsize)
-        pkl_file = os.path.join(self.result_folder, "loss_curve_iter.pkl")
-        with open(pkl_file, "wb") as pck:
-            pickle.dump(loss_history, pck)
+        if verbose:
+            ### 2. learning curve
+            fontsize = 16
+            iter_num = list(range(1, len(loss_history) + 1))
+            plt.figure(3)
+            plt.plot(iter_num, loss_history, "bo-")
+            plt.xlabel("iteration", fontsize=fontsize)
+            plt.ylabel("loss value", fontsize=fontsize)
+            pkl_file = os.path.join(self.result_folder, "loss_curve_iter.pkl")
+            with open(pkl_file, "wb") as pck:
+                pickle.dump(loss_history, pck)
 
-        fig_file = os.path.join(self.result_folder, "loss_curve.png")
-        plt.savefig(fig_file)
+            fig_file = os.path.join(self.result_folder, "loss_curve.png")
+            plt.savefig(fig_file)
         if verbose:
             print("--- Training Finished ---")
 
-    def predict(self, df_data):
+    def predict(self, df_data, verbose=True):
         """
         utils.data_process_repurpose_virtual_screening
         pd.DataFrame
         """
-        print("predicting...")
-        info = data_process_DDI_loader(
+        if verbose:
+            print("predicting...")
+        info = data_process_loader_Protein_Prediction(
             df_data.index.values, df_data.Label.values, df_data, **self.config
         )
         self.model.to(device)
@@ -534,21 +452,10 @@ class DDI_Model:
             "sampler": SequentialSampler(info),
         }
 
-        if self.drug_encoding == "MPNN":
-            params["collate_fn"] = mpnn_collate_func
-        elif self.drug_encoding in [
-            "DGL_GCN",
-            "DGL_GAT",
-            "DGL_NeuralFP",
-            "DGL_GIN_AttrMasking",
-            "DGL_GIN_ContextPred",
-            "DGL_AttentiveFP",
-        ]:
-            params["collate_fn"] = dgl_collate_func
-
         generator = data.DataLoader(info, **params)
 
         score = self.test_(generator, self.model, repurposing_mode=True)
+        # set repurposong mode to true, will return only the scores.
         return score
 
     def save_model(self, path_dir):
