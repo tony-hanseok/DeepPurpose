@@ -80,14 +80,18 @@ def repurpose(
 
         print("Using pretrained model and making predictions...")
 
+        from glob import glob
+        pretrained_model_names = glob(pretrained_dir + "/model_*_bindingdb") + glob(pretrained_dir + "/model_*_kiba") + glob(pretrained_dir + "/model_*_davis")
         for idx, model_name in enumerate(pretrained_model_names):
-            model_path = os.path.join(
-                pretrained_dir, "model_" + model_name[0] + "_" + model_name[1]
-            )
+            # model_path = os.path.join(
+            #     pretrained_dir, "model_" + model_name[0] + "_" + model_name[1]
+            # )
+            model_path = model_name
             model = models.model_pretrained(model_path)
             result_folder_path = os.path.join(
                 save_dir, "results_" + model_name[0] + "_" + model_name[1]
             )
+            result_folder_path = os.path.join(save_dir, "results_"+model_name.split("/")[-1])
 
             if not os.path.exists(result_folder_path):
                 os.mkdir(result_folder_path)
